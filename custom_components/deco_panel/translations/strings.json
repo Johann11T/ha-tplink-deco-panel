@@ -1,0 +1,13 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "TP-Link Deco Panel",
+        "description": "Do you want to set up the TP-Link Deco Panel in your Home Assistant sidebar?"
+      }
+    },
+    "abort": {
+      "single_instance_allowed": "Only a single instance of TP-Link Deco Panel is allowed."
+    }
+  }
+}

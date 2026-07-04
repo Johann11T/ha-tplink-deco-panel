@@ -1,0 +1,12 @@
+{
+  "domain": "deco_panel",
+  "name": "TP-Link Deco Panel",
+  "codeowners": ["@Johann11T"],
+  "dependencies": ["panel_custom"],
+  "config_flow": true,
+  "documentation": "https://github.com/Johann11T/ha-tplink-deco-panel",
+  "integration_type": "service",
+  "iot_class": "calculated",
+  "requirements": [],
+  "version": "1.0.0"
+}
