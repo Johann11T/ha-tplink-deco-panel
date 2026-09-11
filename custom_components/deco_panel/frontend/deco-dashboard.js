@@ -8,6 +8,11 @@ class DecoDashboard extends HTMLElement {
     this.rendered = false;
     this.showConnected = true;
     this.groupOpenStates = {};
+
+    // Sort and grouping controls
+    this.sortBy = 'name'; // 'name' | 'ip' | 'mac'
+    this.sortOrder = 'asc'; // 'asc' | 'desc'
+    this.groupByDeco = true; // true = grouped by deco, false = flat unified list
     
     // For mobile drill-down navigation ('list' or 'details')
     this.mobileView = 'list';
@@ -21,6 +26,136 @@ class DecoDashboard extends HTMLElement {
       .replace(/>/g, '&gt;')
       .replace(/"/g, '&quot;')
       .replace(/'/g, '&#039;');
+  }
+
+  compareIP(ipA, ipB) {
+    if (!ipA && !ipB) return 0;
+    if (!ipA) return 1;
+    if (!ipB) return -1;
+
+    const partsA = String(ipA).trim().split('.');
+    const partsB = String(ipB).trim().split('.');
+
+    if (partsA.length === 4 && partsB.length === 4) {
+      for (let i = 0; i < 4; i++) {
+        const numA = parseInt(partsA[i], 10);
+        const numB = parseInt(partsB[i], 10);
+        const valA = isNaN(numA) ? 0 : numA;
+        const valB = isNaN(numB) ? 0 : numB;
+        if (valA !== valB) {
+          return valA - valB;
+        }
+      }
+      return 0;
+    }
+
+    return String(ipA).localeCompare(String(ipB), undefined, { numeric: true, sensitivity: 'base' });
+  }
+
+  parseMacBytes(mac) {
+    if (!mac) return null;
+    const clean = String(mac).trim();
+    const parts = clean.split(/[:-]/);
+    if (parts.length === 6) {
+      const nums = parts.map(p => parseInt(p, 16));
+      if (nums.every(n => !isNaN(n) && n >= 0 && n <= 255)) {
+        return nums;
+      }
+    }
+    const hexOnly = clean.replace(/[^0-9a-fA-F]/g, '');
+    if (hexOnly.length === 12) {
+      const nums = [];
+      for (let i = 0; i < 12; i += 2) {
+        nums.push(parseInt(hexOnly.slice(i, i + 2), 16));
+      }
+      return nums;
+    }
+    return null;
+  }
+
+  compareMAC(macA, macB) {
+    const bytesA = this.parseMacBytes(macA);
+    const bytesB = this.parseMacBytes(macB);
+
+    if (bytesA && bytesB) {
+      for (let i = 0; i < 6; i++) {
+        if (bytesA[i] !== bytesB[i]) {
+          return bytesA[i] - bytesB[i];
+        }
+      }
+      return 0;
+    }
+
+    if (bytesA) return -1;
+    if (bytesB) return 1;
+
+    return String(macA || '').toLowerCase().localeCompare(String(macB || '').toLowerCase());
+  }
+
+  compareName(nameA, nameB) {
+    return String(nameA || '').localeCompare(String(nameB || ''), undefined, {
+      numeric: true,
+      sensitivity: 'base'
+    });
+  }
+
+  sortDevices(deviceList) {
+    return [...deviceList].sort((a, b) => {
+      let result = 0;
+      if (this.sortBy === 'ip') {
+        if (!a.ip && !b.ip) return 0;
+        if (!a.ip) return 1;
+        if (!b.ip) return -1;
+        result = this.compareIP(a.ip, b.ip);
+      } else if (this.sortBy === 'mac') {
+        if (!a.mac && !b.mac) return 0;
+        if (!a.mac) return 1;
+        if (!b.mac) return -1;
+        result = this.compareMAC(a.mac, b.mac);
+      } else {
+        if (!a.name && !b.name) return 0;
+        if (!a.name) return 1;
+        if (!b.name) return -1;
+        result = this.compareName(a.name, b.name);
+      }
+
+      if (result === 0 && this.sortBy !== 'name') {
+        result = this.compareName(a.name, b.name);
+      }
+
+      return this.sortOrder === 'desc' ? -result : result;
+    });
+  }
+
+  updateToolbarUI() {
+    const sortSelect = this.shadowRoot.getElementById('sort-select');
+    if (sortSelect && sortSelect.value !== this.sortBy) {
+      sortSelect.value = this.sortBy;
+    }
+
+    const sortDirBtn = this.shadowRoot.getElementById('sort-dir-btn');
+    if (sortDirBtn) {
+      sortDirBtn.className = `control-btn ${this.sortOrder}`;
+      const isAsc = this.sortOrder === 'asc';
+      sortDirBtn.title = `Sort order: ${isAsc ? 'Ascending' : 'Descending'} (Click to change)`;
+      sortDirBtn.setAttribute('aria-label', `Sort order: ${isAsc ? 'Ascending' : 'Descending'}`);
+      sortDirBtn.innerHTML = isAsc
+        ? `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5h10M11 9h7M11 13h4M3 17l3 3 3-3M6 18V4"/></svg>`
+        : `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5h10M11 9h7M11 13h4M3 7l3-3 3 3M6 6v14"/></svg>`;
+    }
+
+    const groupBtn = this.shadowRoot.getElementById('group-toggle-btn');
+    if (groupBtn) {
+      if (this.groupByDeco) {
+        groupBtn.classList.add('active');
+        groupBtn.title = 'Deco Grouping: Enabled (Click for flat list)';
+        groupBtn.setAttribute('aria-label', 'Deco Grouping: Enabled');
+      } else {
+        groupBtn.classList.remove('active');
+        groupBtn.title = 'Deco Grouping: Disabled (Click to group by Deco)';
+        groupBtn.setAttribute('aria-label', 'Deco Grouping: Disabled');
+      }
+    }
   }
 
   set hass(hass) {
@@ -63,8 +198,6 @@ class DecoDashboard extends HTMLElement {
         connection: state.attributes.connection_type || 'Unknown',
         deco: state.attributes.deco_device ? state.attributes.deco_device : (state.attributes.device_type === 'deco' ? 'Deco Routers' : 'Unknown Deco')
       };
-    }).sort((a, b) => {
-      return a.name.localeCompare(b.name);
     });
 
     if (!this.selectedMac && this.devices.length > 0) {
@@ -84,6 +217,8 @@ class DecoDashboard extends HTMLElement {
       layout.className = `layout mobile-view-${this.mobileView} ${isDark ? 'theme-dark' : 'theme-light'}`;
     }
 
+    this.updateToolbarUI();
+
     const listContainer = this.shadowRoot.getElementById('device-list');
     const detailsContainer = this.shadowRoot.getElementById('device-details');
     
@@ -98,36 +233,51 @@ class DecoDashboard extends HTMLElement {
       this.showConnected ? d.state === 'home' : d.state !== 'home'
     );
 
-    const groups = {};
-    filteredDevices.forEach(device => {
-      if (!groups[device.deco]) groups[device.deco] = [];
-      groups[device.deco].push(device);
-    });
-    
     if (listContainer) {
       if (filteredDevices.length > 0) {
         let html = '';
-        for (const [decoName, devicesInGroup] of Object.entries(groups)) {
-          let isOpen = this.groupOpenStates[decoName];
-          if (isOpen === undefined) {
-             isOpen = devicesInGroup.some(d => d.mac === this.selectedMac);
-          }
-          const safeDecoName = this.escapeHtml(decoName);
-          html += `
-            <details class="deco-group" data-deco="${safeDecoName}" ${isOpen ? 'open' : ''}>
-              <summary class="group-title">
-                <div class="group-header-info">
-                  <svg class="group-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.55a11 11 0 0 1 14.08 0"></path><path d="M1.42 9a16 16 0 0 1 21.16 0"></path><path d="M8.53 16.11a6 6 0 0 1 6.95 0"></path><line x1="12" y1="20" x2="12.01" y2="20"></line></svg>
-                  ${safeDecoName}
+        if (this.groupByDeco) {
+          const groups = {};
+          filteredDevices.forEach(device => {
+            if (!groups[device.deco]) groups[device.deco] = [];
+            groups[device.deco].push(device);
+          });
+
+          // Sort Deco group names alphabetically for stable order
+          const groupNames = Object.keys(groups).sort((a, b) => a.localeCompare(b));
+
+          for (const decoName of groupNames) {
+            const devicesInGroup = this.sortDevices(groups[decoName]);
+            let isOpen = this.groupOpenStates[decoName];
+            if (isOpen === undefined) {
+              isOpen = devicesInGroup.some(d => d.mac === this.selectedMac);
+            }
+            const safeDecoName = this.escapeHtml(decoName);
+            html += `
+              <details class="deco-group" data-deco="${safeDecoName}" ${isOpen ? 'open' : ''}>
+                <summary class="group-title">
+                  <div class="group-header-info">
+                    <svg class="group-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.55a11 11 0 0 1 14.08 0"></path><path d="M1.42 9a16 16 0 0 1 21.16 0"></path><path d="M8.53 16.11a6 6 0 0 1 6.95 0"></path><line x1="12" y1="20" x2="12.01" y2="20"></line></svg>
+                    ${safeDecoName}
+                  </div>
+                  <span class="group-badge">${devicesInGroup.length}</span>
+                </summary>
+                <div class="group-content">
+                  ${devicesInGroup.map(device => this.getDeviceHtml(device, false)).join('')}
                 </div>
-                <span class="group-badge">${devicesInGroup.length}</span>
-              </summary>
-              <div class="group-content">
-                ${devicesInGroup.map(device => this.getDeviceHtml(device)).join('')}
-              </div>
-            </details>
+              </details>
+            `;
+          }
+        } else {
+          // Flat list: all devices sorted globally
+          const sortedAll = this.sortDevices(filteredDevices);
+          html = `
+            <div class="flat-list">
+              ${sortedAll.map(device => this.getDeviceHtml(device, true)).join('')}
+            </div>
           `;
         }
+
         listContainer.innerHTML = html;
         
         const items = listContainer.querySelectorAll('.device-item');
@@ -220,21 +370,31 @@ class DecoDashboard extends HTMLElement {
     }
   }
 
-  getDeviceHtml(device) {
+  getDeviceHtml(device, showDecoBadge = false) {
     const isSelected = device.mac === this.selectedMac;
     const isConnected = device.state === 'home';
     const safeName = this.escapeHtml(device.name);
     const safeMac = this.escapeHtml(device.mac);
     const safeIp = this.escapeHtml(device.ip);
+    const safeDeco = this.escapeHtml(device.deco);
+
+    const primaryBadge = this.sortBy === 'mac'
+      ? `<span class="badge" title="MAC: ${safeMac}">${safeMac}</span>`
+      : `<span class="badge" title="IP: ${safeIp}">${safeIp}</span>`;
+
+    const decoBadge = showDecoBadge
+      ? `<span class="badge deco-badge" title="Deco: ${safeDeco}">${safeDeco}</span>`
+      : '';
     
     return `
       <div class="device-item ${isSelected ? 'active' : ''}" data-mac="${safeMac}">
         <div class="device-header">
           <div class="status-dot ${isConnected ? 'online' : 'offline'}"></div>
-          <div class="device-name">${safeName}</div>
+          <div class="device-name" title="${safeName}">${safeName}</div>
         </div>
         <div class="device-meta">
-          <span class="badge">${safeIp}</span>
+          ${primaryBadge}
+          ${decoBadge}
         </div>
       </div>
     `;
@@ -483,6 +643,91 @@ class DecoDashboard extends HTMLElement {
         input:checked + .toggle-slider { background-color: var(--accent-green); }
         input:checked + .toggle-slider:before { transform: translateX(22px); }
 
+        /* TOOLBAR / SORT CONTROLS */
+        .toolbar-controls {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          margin-top: 12px;
+        }
+        .sort-select-wrapper {
+          flex: 1;
+          position: relative;
+        }
+        .sort-select {
+          width: 100%;
+          appearance: none;
+          -webkit-appearance: none;
+          background: var(--bg-main);
+          color: var(--text-primary);
+          border: 1px solid var(--border-light);
+          border-radius: 8px;
+          padding: 8px 28px 8px 10px;
+          font-size: 0.8rem;
+          font-weight: 500;
+          font-family: inherit;
+          cursor: pointer;
+          transition: border-color 0.2s, background-color 0.2s;
+          outline: none;
+        }
+        .sort-select:hover {
+          border-color: var(--border-heavy);
+        }
+        .sort-select:focus {
+          border-color: var(--accent-blue);
+        }
+        .sort-select-wrapper::after {
+          content: "";
+          position: absolute;
+          right: 10px;
+          top: 50%;
+          transform: translateY(-50%);
+          width: 0;
+          height: 0;
+          pointer-events: none;
+          border-left: 4px solid transparent;
+          border-right: 4px solid transparent;
+          border-top: 5px solid var(--text-secondary);
+        }
+        .control-btn {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          width: 34px;
+          height: 34px;
+          border-radius: 8px;
+          border: 1px solid var(--border-light);
+          background: var(--bg-main);
+          color: var(--text-secondary);
+          cursor: pointer;
+          transition: all 0.2s ease;
+          padding: 0;
+          flex-shrink: 0;
+        }
+        .control-btn:hover {
+          background: var(--bg-element);
+          color: var(--text-primary);
+          border-color: var(--border-heavy);
+        }
+        .control-btn.active {
+          background: var(--accent-blue-bg);
+          color: var(--accent-blue);
+          border-color: var(--accent-blue-border);
+        }
+        .flat-list {
+          display: flex;
+          flex-direction: column;
+          gap: 4px;
+        }
+        .badge.deco-badge {
+          color: var(--accent-blue);
+          background: var(--accent-blue-bg);
+          max-width: 130px;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+
         .device-list { flex: 1; overflow-y: auto; padding: 16px; }
         .device-list::-webkit-scrollbar { width: 6px; }
         .device-list::-webkit-scrollbar-thumb { background: var(--border-heavy); border-radius: 10px; }
@@ -601,6 +846,25 @@ class DecoDashboard extends HTMLElement {
               </label>
               <span class="filter-label active" id="lbl-on">Connected</span>
             </div>
+
+            <div class="toolbar-controls">
+              <div class="sort-select-wrapper">
+                <select id="sort-select" class="sort-select" aria-label="Sort devices by">
+                  <option value="name" ${this.sortBy === 'name' ? 'selected' : ''}>Sort: Name</option>
+                  <option value="ip" ${this.sortBy === 'ip' ? 'selected' : ''}>Sort: IP Address</option>
+                  <option value="mac" ${this.sortBy === 'mac' ? 'selected' : ''}>Sort: MAC Address</option>
+                </select>
+              </div>
+              <button id="sort-dir-btn" class="control-btn" title="Sort order" aria-label="Toggle sort order">
+              </button>
+              <button id="group-toggle-btn" class="control-btn ${this.groupByDeco ? 'active' : ''}" title="Toggle Deco grouping" aria-label="Toggle Deco grouping">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <polygon points="12 2 2 7 12 12 22 7 12 2"></polygon>
+                  <polyline points="2 17 12 22 22 17"></polyline>
+                  <polyline points="2 12 12 17 22 12"></polyline>
+                </svg>
+              </button>
+            </div>
           </div>
           <div class="device-list" id="device-list">
             <!-- List goes here -->
@@ -616,10 +880,34 @@ class DecoDashboard extends HTMLElement {
     const lblOff = this.shadowRoot.getElementById('lbl-off');
     const lblOn = this.shadowRoot.getElementById('lbl-on');
     const menuBtn = this.shadowRoot.getElementById('ha-menu-btn');
+    const sortSelect = this.shadowRoot.getElementById('sort-select');
+    const sortDirBtn = this.shadowRoot.getElementById('sort-dir-btn');
+    const groupBtn = this.shadowRoot.getElementById('group-toggle-btn');
 
     if (menuBtn) {
       menuBtn.addEventListener('click', () => {
         this.dispatchEvent(new Event('hass-toggle-menu', { bubbles: true, composed: true }));
+      });
+    }
+
+    if (sortSelect) {
+      sortSelect.addEventListener('change', (e) => {
+        this.sortBy = e.target.value;
+        this.updateUI();
+      });
+    }
+
+    if (sortDirBtn) {
+      sortDirBtn.addEventListener('click', () => {
+        this.sortOrder = this.sortOrder === 'asc' ? 'desc' : 'asc';
+        this.updateUI();
+      });
+    }
+
+    if (groupBtn) {
+      groupBtn.addEventListener('click', () => {
+        this.groupByDeco = !this.groupByDeco;
+        this.updateUI();
       });
     }
 

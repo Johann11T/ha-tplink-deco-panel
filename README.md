@@ -10,6 +10,7 @@ A beautiful and modern dashboard panel for your TP-Link Deco network in Home Ass
 - 🎛️ **Live Filtering:** Filter between connected and disconnected devices.
 - ⚡ **Real-time Stats:** Live view of upload/download bandwidth, connection type, IP, and MAC address.
 - 📋 **Copy to Clipboard:** 1-click copying of device data for easy network management.
+- 🔄 **Advanced Sorting & Grouping:** Sort devices by Name, IP Address, or MAC Address (Asc/Desc), with optional flat list or Deco router grouping.
 
 ## Installation via HACS (Recommended)
 
