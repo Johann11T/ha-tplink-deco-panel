@@ -1,9 +1,18 @@
+const GROUP_MODES = ['deco', 'split', 'flat'];
+const GROUP_MODE_STORAGE_KEY = 'deco-panel-group-mode';
+const UNKNOWN_GROUP_KEY = '__unknown__';
+const NODES_GROUP_KEY = '__nodes__';
+const DEVICES_GROUP_KEY = '__devices__';
+const WIFI_ICON = '<svg class="group-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.55a11 11 0 0 1 14.08 0"></path><path d="M1.42 9a16 16 0 0 1 21.16 0"></path><path d="M8.53 16.11a6 6 0 0 1 6.95 0"></path><line x1="12" y1="20" x2="12.01" y2="20"></line></svg>';
+
 class DecoDashboard extends HTMLElement {
   constructor() {
     super();
     this.attachShadow({ mode: 'open' });
     this._hass = null;
-    this.devices = [];
+    this.devices = []; // Decos + clients, used for selection lookup
+    this.decos = [];
+    this.clients = [];
     this.selectedMac = null;
     this.rendered = false;
     this.showConnected = true;
@@ -12,10 +21,61 @@ class DecoDashboard extends HTMLElement {
     // Sort and grouping controls
     this.sortBy = 'name'; // 'name' | 'ip' | 'mac'
     this.sortOrder = 'asc'; // 'asc' | 'desc'
-    this.groupByDeco = true; // true = grouped by deco, false = flat unified list
-    
+    this.groupMode = this.loadGroupMode(); // 'deco' | 'split' | 'flat'
+
     // For mobile drill-down navigation ('list' or 'details')
     this.mobileView = 'list';
+  }
+
+  loadGroupMode() {
+    try {
+      const stored = window.localStorage.getItem(GROUP_MODE_STORAGE_KEY);
+      if (GROUP_MODES.includes(stored)) return stored;
+    } catch (e) {
+      // localStorage unavailable (private mode, etc.): fall back to default
+    }
+    return 'deco';
+  }
+
+  saveGroupMode() {
+    try {
+      window.localStorage.setItem(GROUP_MODE_STORAGE_KEY, this.groupMode);
+    } catch (e) {
+      // Ignore persistence errors
+    }
+  }
+
+  // ha-tplink-deco appends " Deco" to Deco names by default ("Buanderie Deco").
+  // The role badge already says it's a Deco, so drop the redundant suffix.
+  stripDecoSuffix(name) {
+    const stripped = name.replace(/\s+deco$/i, '').trim();
+    return stripped || name;
+  }
+
+  normalizeMac(mac) {
+    return String(mac || '').trim().toLowerCase();
+  }
+
+  matchesFilter(item) {
+    return this.showConnected ? item.state === 'home' : item.state !== 'home';
+  }
+
+  // Main Deco always first, then satellites (and unknown roles) by the current sort
+  sortDecos(decoList) {
+    const mains = decoList.filter(d => d.role === 'main');
+    const others = decoList.filter(d => d.role !== 'main');
+    return [...this.sortDevices(mains), ...this.sortDevices(others)];
+  }
+
+  getRoleBadgeHtml(role) {
+    if (role === 'main') return '<span class="role-badge main">Main</span>';
+    if (role === 'satellite') return '<span class="role-badge satellite">Satellite</span>';
+    return '';
+  }
+
+  getStatusDotClass(item) {
+    if (item.state === 'home') return 'online';
+    return item.isDeco ? 'offline deco-offline' : 'offline';
   }
 
   escapeHtml(str) {
@@ -144,17 +204,9 @@ class DecoDashboard extends HTMLElement {
         : `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5h10M11 9h7M11 13h4M3 7l3-3 3 3M6 6v14"/></svg>`;
     }
 
-    const groupBtn = this.shadowRoot.getElementById('group-toggle-btn');
-    if (groupBtn) {
-      if (this.groupByDeco) {
-        groupBtn.classList.add('active');
-        groupBtn.title = 'Deco Grouping: Enabled (Click for flat list)';
-        groupBtn.setAttribute('aria-label', 'Deco Grouping: Enabled');
-      } else {
-        groupBtn.classList.remove('active');
-        groupBtn.title = 'Deco Grouping: Disabled (Click to group by Deco)';
-        groupBtn.setAttribute('aria-label', 'Deco Grouping: Disabled');
-      }
+    const groupSelect = this.shadowRoot.getElementById('group-select');
+    if (groupSelect && groupSelect.value !== this.groupMode) {
+      groupSelect.value = this.groupMode;
     }
   }
 
@@ -177,28 +229,59 @@ class DecoDashboard extends HTMLElement {
     if (!this._hass) return;
     
     const allStates = Object.values(this._hass.states);
-    const trackers = allStates.filter(state => 
-      state.entity_id && 
-      state.entity_id.startsWith('device_tracker.') && 
+    // Decos are kept even without an IP (e.g. an offline satellite that never reported one)
+    const trackers = allStates.filter(state =>
+      state.entity_id &&
+      state.entity_id.startsWith('device_tracker.') &&
       state.attributes &&
-      state.attributes.mac && 
-      state.attributes.ip
+      state.attributes.mac &&
+      (state.attributes.ip || state.attributes.device_type === 'deco')
     );
 
-    this.devices = trackers.map(state => {
-      let name = state.attributes.ui_device_name || state.attributes.friendly_name || state.entity_id;
+    const items = trackers.map(state => {
+      const attrs = state.attributes;
+      const isDeco = attrs.device_type === 'deco';
+      let name = String(attrs.ui_device_name || attrs.friendly_name || state.entity_id);
+      if (isDeco) name = this.stripDecoSuffix(name);
+      let role = null;
+      if (isDeco && attrs.master === true) role = 'main';
+      else if (isDeco && attrs.master === false) role = 'satellite';
       return {
         entity_id: state.entity_id,
         name: String(name),
-        mac: state.attributes.mac,
-        ip: state.attributes.ip,
+        mac: attrs.mac,
+        macKey: this.normalizeMac(attrs.mac),
+        ip: attrs.ip || '',
         state: state.state,
-        down: state.attributes.down_kilobytes_per_s || 0,
-        up: state.attributes.up_kilobytes_per_s || 0,
-        connection: state.attributes.connection_type || 'Unknown',
-        deco: state.attributes.deco_device ? state.attributes.deco_device : (state.attributes.device_type === 'deco' ? 'Deco Routers' : 'Unknown Deco')
+        down: attrs.down_kilobytes_per_s || 0,
+        up: attrs.up_kilobytes_per_s || 0,
+        connection: attrs.connection_type || 'Unknown',
+        isDeco,
+        role, // 'main' | 'satellite' | null (unknown, e.g. right after an HA restart)
+        model: attrs.device_model || null,
+        swVersion: attrs.sw_version || null,
+        decoMacKey: this.normalizeMac(attrs.deco_mac),
+        decoName: attrs.deco_device || null,
+        deco: null, // Parent Deco display name (clients only)
+        groupKey: null // Parent Deco MAC key (clients only)
       };
     });
+
+    this.decos = items.filter(item => item.isDeco);
+    this.clients = items.filter(item => !item.isDeco);
+
+    // Link each client to its Deco by MAC (unambiguous), falling back to the name
+    const decoByMac = new Map(this.decos.map(d => [d.macKey, d]));
+    const decoByName = new Map(this.decos.map(d => [d.name, d]));
+    this.clients.forEach(client => {
+      const parent = (client.decoMacKey && decoByMac.get(client.decoMacKey)) ||
+        (client.decoName && decoByName.get(client.decoName)) ||
+        null;
+      client.groupKey = parent ? parent.macKey : UNKNOWN_GROUP_KEY;
+      client.deco = parent ? parent.name : (client.decoName || 'Unknown Deco');
+    });
+
+    this.devices = items;
 
     if (!this.selectedMac && this.devices.length > 0) {
       this.selectedMac = this.devices[0].mac;
@@ -229,63 +312,33 @@ class DecoDashboard extends HTMLElement {
       });
     }
 
-    const filteredDevices = this.devices.filter(d => 
-      this.showConnected ? d.state === 'home' : d.state !== 'home'
-    );
-
     if (listContainer) {
-      if (filteredDevices.length > 0) {
-        let html = '';
-        if (this.groupByDeco) {
-          const groups = {};
-          filteredDevices.forEach(device => {
-            if (!groups[device.deco]) groups[device.deco] = [];
-            groups[device.deco].push(device);
-          });
+      let html = '';
+      if (this.groupMode === 'deco') {
+        html = this.getGroupedByDecoHtml();
+      } else if (this.groupMode === 'split') {
+        html = this.getSplitHtml();
+      } else {
+        html = this.getFlatHtml();
+      }
 
-          // Sort Deco group names alphabetically for stable order
-          const groupNames = Object.keys(groups).sort((a, b) => a.localeCompare(b));
-
-          for (const decoName of groupNames) {
-            const devicesInGroup = this.sortDevices(groups[decoName]);
-            let isOpen = this.groupOpenStates[decoName];
-            if (isOpen === undefined) {
-              isOpen = devicesInGroup.some(d => d.mac === this.selectedMac);
-            }
-            const safeDecoName = this.escapeHtml(decoName);
-            html += `
-              <details class="deco-group" data-deco="${safeDecoName}" ${isOpen ? 'open' : ''}>
-                <summary class="group-title">
-                  <div class="group-header-info">
-                    <svg class="group-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.55a11 11 0 0 1 14.08 0"></path><path d="M1.42 9a16 16 0 0 1 21.16 0"></path><path d="M8.53 16.11a6 6 0 0 1 6.95 0"></path><line x1="12" y1="20" x2="12.01" y2="20"></line></svg>
-                    ${safeDecoName}
-                  </div>
-                  <span class="group-badge">${devicesInGroup.length}</span>
-                </summary>
-                <div class="group-content">
-                  ${devicesInGroup.map(device => this.getDeviceHtml(device, false)).join('')}
-                </div>
-              </details>
-            `;
-          }
-        } else {
-          // Flat list: all devices sorted globally
-          const sortedAll = this.sortDevices(filteredDevices);
-          html = `
-            <div class="flat-list">
-              ${sortedAll.map(device => this.getDeviceHtml(device, true)).join('')}
-            </div>
-          `;
-        }
-
+      if (html) {
         listContainer.innerHTML = html;
-        
+
         const items = listContainer.querySelectorAll('.device-item');
         items.forEach(item => {
           item.addEventListener('click', (e) => {
-            this.selectedMac = e.currentTarget.dataset.mac;
-            this.mobileView = 'details'; // Navigate to details on mobile
-            this.updateUI();
+            this.selectDevice(e.currentTarget.dataset.mac);
+          });
+        });
+
+        // Deco details button in mode 1 headers: must not toggle the <details>
+        const infoBtns = listContainer.querySelectorAll('.group-info-btn');
+        infoBtns.forEach(btn => {
+          btn.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            this.selectDevice(e.currentTarget.dataset.mac);
           });
         });
       } else {
@@ -370,31 +423,153 @@ class DecoDashboard extends HTMLElement {
     }
   }
 
+  selectDevice(mac) {
+    this.selectedMac = mac;
+    this.mobileView = 'details'; // Navigate to details on mobile
+    this.updateUI();
+  }
+
+  getGroupHtml({ key, headerHtml, actionsHtml = '', count, contentHtml, defaultOpen, active = false }) {
+    let isOpen = this.groupOpenStates[key];
+    if (isOpen === undefined) isOpen = defaultOpen;
+    return `
+      <details class="deco-group" data-deco="${this.escapeHtml(key)}" ${isOpen ? 'open' : ''}>
+        <summary class="group-title ${active ? 'active' : ''}">
+          <div class="group-header-info">${headerHtml}</div>
+          <div class="group-header-actions">
+            ${actionsHtml}
+            <span class="group-badge">${count}</span>
+          </div>
+        </summary>
+        <div class="group-content">${contentHtml}</div>
+      </details>
+    `;
+  }
+
+  // Mode 1: one group per Deco (Main first), its clients inside.
+  // A group shows if the Deco itself matches the filter, or any of its clients does.
+  getGroupedByDecoHtml() {
+    const filteredClients = this.clients.filter(c => this.matchesFilter(c));
+    const emptyText = this.showConnected ? 'No connected devices' : 'No disconnected devices';
+    let html = '';
+
+    for (const deco of this.sortDecos(this.decos)) {
+      const groupClients = this.sortDevices(filteredClients.filter(c => c.groupKey === deco.macKey));
+      if (!this.matchesFilter(deco) && groupClients.length === 0) continue;
+
+      const isDecoSelected = deco.mac === this.selectedMac;
+      const safeName = this.escapeHtml(deco.name);
+      const safeMac = this.escapeHtml(deco.mac);
+      html += this.getGroupHtml({
+        key: deco.macKey,
+        headerHtml: `
+          <div class="status-dot ${this.getStatusDotClass(deco)}"></div>
+          <span class="group-name" title="${safeName}">${safeName}</span>
+          ${this.getRoleBadgeHtml(deco.role)}
+        `,
+        actionsHtml: `
+          <button class="group-info-btn ${isDecoSelected ? 'active' : ''}" data-mac="${safeMac}" title="Deco details" aria-label="Show details for ${safeName}">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>
+          </button>
+        `,
+        count: groupClients.length,
+        contentHtml: groupClients.length > 0
+          ? groupClients.map(c => this.getDeviceHtml(c, false)).join('')
+          : `<div class="group-empty">${emptyText}</div>`,
+        defaultOpen: groupClients.some(c => c.mac === this.selectedMac),
+        active: isDecoSelected
+      });
+    }
+
+    // Clients whose Deco could not be resolved
+    const orphans = this.sortDevices(filteredClients.filter(c => c.groupKey === UNKNOWN_GROUP_KEY));
+    if (orphans.length > 0) {
+      html += this.getGroupHtml({
+        key: UNKNOWN_GROUP_KEY,
+        headerHtml: `${WIFI_ICON}<span class="group-name">Unknown Deco</span>`,
+        count: orphans.length,
+        contentHtml: orphans.map(c => this.getDeviceHtml(c, false)).join(''),
+        defaultOpen: orphans.some(c => c.mac === this.selectedMac)
+      });
+    }
+
+    return html;
+  }
+
+  // Mode 2: "Deco Nodes" section + "Devices" section, each filtered by its own items' state.
+  getSplitHtml() {
+    const nodes = this.sortDecos(this.decos.filter(d => this.matchesFilter(d)));
+    const devices = this.sortDevices(this.clients.filter(c => this.matchesFilter(c)));
+    let html = '';
+
+    if (nodes.length > 0) {
+      html += this.getGroupHtml({
+        key: NODES_GROUP_KEY,
+        headerHtml: `${WIFI_ICON}<span class="group-name">Deco Nodes</span>`,
+        count: nodes.length,
+        contentHtml: nodes.map(d => this.getDeviceHtml(d, false)).join(''),
+        defaultOpen: true
+      });
+    }
+
+    if (devices.length > 0) {
+      html += this.getGroupHtml({
+        key: DEVICES_GROUP_KEY,
+        headerHtml: `
+          <svg class="group-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line></svg>
+          <span class="group-name">Devices</span>
+        `,
+        count: devices.length,
+        contentHtml: devices.map(c => this.getDeviceHtml(c, true)).join(''),
+        defaultOpen: true
+      });
+    }
+
+    return html;
+  }
+
+  // Mode 3: flat list of Decos and clients, sorted globally.
+  getFlatHtml() {
+    const all = this.sortDevices(this.devices.filter(d => this.matchesFilter(d)));
+    if (all.length === 0) return '';
+    return `
+      <div class="flat-list">
+        ${all.map(d => this.getDeviceHtml(d, true)).join('')}
+      </div>
+    `;
+  }
+
   getDeviceHtml(device, showDecoBadge = false) {
     const isSelected = device.mac === this.selectedMac;
-    const isConnected = device.state === 'home';
     const safeName = this.escapeHtml(device.name);
     const safeMac = this.escapeHtml(device.mac);
     const safeIp = this.escapeHtml(device.ip);
     const safeDeco = this.escapeHtml(device.deco);
 
-    const primaryBadge = this.sortBy === 'mac'
-      ? `<span class="badge" title="MAC: ${safeMac}">${safeMac}</span>`
-      : `<span class="badge" title="IP: ${safeIp}">${safeIp}</span>`;
+    let primaryBadge = '';
+    if (this.sortBy === 'mac') {
+      primaryBadge = `<span class="badge" title="MAC: ${safeMac}">${safeMac}</span>`;
+    } else if (device.ip) {
+      primaryBadge = `<span class="badge" title="IP: ${safeIp}">${safeIp}</span>`;
+    }
 
-    const decoBadge = showDecoBadge
-      ? `<span class="badge deco-badge" title="Deco: ${safeDeco}">${safeDeco}</span>`
-      : '';
-    
+    // Decos show their role; clients optionally show their parent Deco
+    let secondaryBadge = '';
+    if (device.isDeco) {
+      secondaryBadge = this.getRoleBadgeHtml(device.role);
+    } else if (showDecoBadge) {
+      secondaryBadge = `<span class="badge deco-badge" title="Deco: ${safeDeco}">${safeDeco}</span>`;
+    }
+
     return `
       <div class="device-item ${isSelected ? 'active' : ''}" data-mac="${safeMac}">
         <div class="device-header">
-          <div class="status-dot ${isConnected ? 'online' : 'offline'}"></div>
+          <div class="status-dot ${this.getStatusDotClass(device)}"></div>
           <div class="device-name" title="${safeName}">${safeName}</div>
         </div>
         <div class="device-meta">
           ${primaryBadge}
-          ${decoBadge}
+          ${secondaryBadge}
         </div>
       </div>
     `;
@@ -410,8 +585,31 @@ class DecoDashboard extends HTMLElement {
     const safeName = this.escapeHtml(device.name);
     const safeIp = this.escapeHtml(device.ip);
     const safeMac = this.escapeHtml(device.mac);
-    const safeDeco = this.escapeHtml(device.deco);
     const safeConnType = this.escapeHtml(connType);
+
+    const layersIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 2 7 12 12 22 7 12 2"></polygon><polyline points="2 17 12 22 22 17"></polyline><polyline points="2 12 12 17 22 12"></polyline></svg>';
+    const infoCard = (icon, label, value) => `
+        <div class="info-card">
+          <div class="card-icon">${icon}</div>
+          <div class="card-content">
+            <div class="card-label">${label}</div>
+            <div class="card-value">${this.escapeHtml(value)}</div>
+          </div>
+        </div>`;
+
+    let extraCardsHtml = '';
+    if (device.isDeco) {
+      const roleLabel = device.role === 'main' ? 'Main' : (device.role === 'satellite' ? 'Satellite' : 'Unknown');
+      extraCardsHtml += infoCard(layersIcon, 'Deco Role', roleLabel);
+      if (device.model) {
+        extraCardsHtml += infoCard('<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2" ry="2"></rect><rect x="9" y="9" width="6" height="6"></rect></svg>', 'Model', device.model);
+      }
+      if (device.swVersion) {
+        extraCardsHtml += infoCard('<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>', 'Firmware', device.swVersion);
+      }
+    } else {
+      extraCardsHtml += infoCard(layersIcon, 'Parent Deco Node', device.deco);
+    }
 
     return `
       <div class="details-header">
@@ -479,18 +677,10 @@ class DecoDashboard extends HTMLElement {
           </div>
         </div>
 
-        <div class="info-card">
-          <div class="card-icon">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 2 7 12 12 22 7 12 2"></polygon><polyline points="2 17 12 22 22 17"></polyline><polyline points="2 12 12 17 22 12"></polyline></svg>
-          </div>
-          <div class="card-content">
-            <div class="card-label">Parent Deco Node</div>
-            <div class="card-value">${safeDeco}</div>
-          </div>
-        </div>
+        ${extraCardsHtml}
       </div>
 
-      <div class="bandwidth-section">
+      ${device.isDeco ? '' : `<div class="bandwidth-section">
         <h2>Network Activity</h2>
         <div class="cards-container">
           <div class="bw-card down">
@@ -509,7 +699,7 @@ class DecoDashboard extends HTMLElement {
             <div class="bw-value">${device.up} <span class="unit">KB/s</span></div>
           </div>
         </div>
-      </div>
+      </div>`}
     `;
   }
 
@@ -546,6 +736,8 @@ class DecoDashboard extends HTMLElement {
           --accent-green: #10b981;
           --accent-green-bg: rgba(16, 185, 129, 0.15);
           --accent-purple: #8b5cf6;
+          --accent-purple-bg: rgba(139, 92, 246, 0.15);
+          --accent-red: #ef4444;
 
           display: flex;
           height: 100vh;
@@ -646,10 +838,12 @@ class DecoDashboard extends HTMLElement {
         /* TOOLBAR / SORT CONTROLS */
         .toolbar-controls {
           display: flex;
+          flex-wrap: wrap;
           align-items: center;
           gap: 8px;
           margin-top: 12px;
         }
+        .group-select-wrapper { flex-basis: 100%; }
         .sort-select-wrapper {
           flex: 1;
           position: relative;
@@ -739,8 +933,25 @@ class DecoDashboard extends HTMLElement {
           display: flex; justify-content: space-between; align-items: center; background: var(--bg-element); list-style: none; user-select: none;
         }
         .group-title::-webkit-details-marker { display: none; }
-        .group-header-info { display: flex; align-items: center; gap: 8px; }
-        .group-icon { width: 16px; height: 16px; color: var(--text-secondary); }
+        .group-title.active { background: var(--accent-blue-bg); }
+        .group-header-info { display: flex; align-items: center; gap: 8px; min-width: 0; }
+        .group-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .group-header-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; margin-left: 8px; }
+        .group-info-btn {
+          display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; padding: 0;
+          border-radius: 6px; border: 1px solid transparent; background: none; color: var(--text-secondary); cursor: pointer; transition: all 0.2s;
+        }
+        .group-info-btn svg { width: 16px; height: 16px; }
+        .group-info-btn:hover { background: var(--bg-panel); color: var(--text-primary); border-color: var(--border-heavy); }
+        .group-info-btn.active { color: var(--accent-blue); border-color: var(--accent-blue-border); background: var(--accent-blue-bg); }
+        .group-empty { padding: 10px 12px; font-size: 0.8rem; color: var(--text-muted); font-style: italic; }
+        .role-badge {
+          font-size: 0.65rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px;
+          padding: 2px 6px; border-radius: 4px; flex-shrink: 0;
+        }
+        .role-badge.main { color: var(--accent-green); background: var(--accent-green-bg); }
+        .role-badge.satellite { color: var(--accent-purple); background: var(--accent-purple-bg); }
+        .group-icon { width: 16px; height: 16px; color: var(--text-secondary); flex-shrink: 0; }
         .group-badge { background: var(--bg-panel); color: var(--text-secondary); padding: 2px 8px; border-radius: 12px; font-size: 0.75rem; font-weight: 700; }
         .group-content { padding: 8px; background: var(--bg-panel); border-top: 1px solid var(--border-heavy); }
 
@@ -752,6 +963,8 @@ class DecoDashboard extends HTMLElement {
         .status-dot { width: 8px; height: 8px; border-radius: 50%; }
         .status-dot.online { background-color: var(--accent-green); }
         .status-dot.offline { background-color: var(--text-muted); }
+        .status-dot.deco-offline { background-color: var(--accent-red); }
+        .status-dot { flex-shrink: 0; }
         .device-name { font-weight: 500; font-size: 0.9rem; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
         .device-meta { display: flex; gap: 8px; padding-left: 18px; }
         .badge {
@@ -857,13 +1070,13 @@ class DecoDashboard extends HTMLElement {
               </div>
               <button id="sort-dir-btn" class="control-btn" title="Sort order" aria-label="Toggle sort order">
               </button>
-              <button id="group-toggle-btn" class="control-btn ${this.groupByDeco ? 'active' : ''}" title="Toggle Deco grouping" aria-label="Toggle Deco grouping">
-                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <polygon points="12 2 2 7 12 12 22 7 12 2"></polygon>
-                  <polyline points="2 17 12 22 22 17"></polyline>
-                  <polyline points="2 12 12 17 22 12"></polyline>
-                </svg>
-              </button>
+              <div class="sort-select-wrapper group-select-wrapper">
+                <select id="group-select" class="sort-select" aria-label="Group devices by">
+                  <option value="deco" ${this.groupMode === 'deco' ? 'selected' : ''}>Group: By Deco</option>
+                  <option value="split" ${this.groupMode === 'split' ? 'selected' : ''}>Group: Decos &amp; Devices</option>
+                  <option value="flat" ${this.groupMode === 'flat' ? 'selected' : ''}>Group: None (flat)</option>
+                </select>
+              </div>
             </div>
           </div>
           <div class="device-list" id="device-list">
@@ -882,7 +1095,7 @@ class DecoDashboard extends HTMLElement {
     const menuBtn = this.shadowRoot.getElementById('ha-menu-btn');
     const sortSelect = this.shadowRoot.getElementById('sort-select');
     const sortDirBtn = this.shadowRoot.getElementById('sort-dir-btn');
-    const groupBtn = this.shadowRoot.getElementById('group-toggle-btn');
+    const groupSelect = this.shadowRoot.getElementById('group-select');
 
     if (menuBtn) {
       menuBtn.addEventListener('click', () => {
@@ -904,9 +1117,11 @@ class DecoDashboard extends HTMLElement {
       });
     }
 
-    if (groupBtn) {
-      groupBtn.addEventListener('click', () => {
-        this.groupByDeco = !this.groupByDeco;
+    if (groupSelect) {
+      groupSelect.addEventListener('change', (e) => {
+        if (!GROUP_MODES.includes(e.target.value)) return;
+        this.groupMode = e.target.value;
+        this.saveGroupMode();
         this.updateUI();
       });
     }
