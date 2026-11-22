@@ -12,12 +12,15 @@ A beautiful and modern dashboard panel for your TP-Link Deco network in Home Ass
 - 📋 **Copy to Clipboard:** 1-click copying of device data for easy network management.
 - 🔄 **Advanced Sorting & Grouping:** Sort devices by Name, IP Address, or MAC Address (Asc/Desc), with optional flat list or Deco router grouping.
 
-## Installation via HACS (Recommended)
+## Installation via the Home Assistant Marketplace (Recommended)
 
-1. Open HACS in your Home Assistant.
-2. Search for "TP-Link Deco Panel" in the **Integrations** tab.
-3. Download and install it.
-4. **Restart Home Assistant**.
-5. Go to **Settings > Devices & Services**.
-6. Click **Add Integration** and search for "TP-Link Deco Panel".
-7. Click it to set it up automatically. Your sidebar will immediately update with the new panel!
+Starting with Home Assistant 2026.11, HACS is built into Home Assistant as the **Marketplace**. If you are on an older version, you can still install this integration through [HACS](https://hacs.xyz/) using the same steps (search for "TP-Link Deco Panel" in the **Integrations** tab).
+
+1. Make sure the [ha-tplink-deco](https://github.com/amosyuen/ha-tplink-deco) integration is installed and configured.
+2. In Home Assistant, go to **Settings > Marketplace**. (The first time, accept the community-content warning.)
+3. Search for "TP-Link Deco Panel" and open it.
+4. Select **Install**.
+5. **Restart Home Assistant** if the Marketplace asks you to.
+6. Go to **Settings > Devices & Services**.
+7. Click **Add Integration** and search for "TP-Link Deco Panel".
+8. Click it to set it up automatically. Your sidebar will immediately update with the new panel!
